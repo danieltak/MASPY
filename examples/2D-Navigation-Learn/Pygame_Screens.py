@@ -142,9 +142,9 @@ class MapVisualizer:
         for y in range(0, self.env.map_size[1]*self.cell_size, self.cell_size):
             pygame.draw.line(self.screen, GRID_COLOR, (0, y), (self.env.map_size[0]*self.cell_size, y))
 
-        # draw target
-        target = self.env.get(Percept("target", (Any, Any)))
-        if target:
+        # draw targets
+        targets = self.env.get(Percept("target", (Any, Any)), all=True) or []
+        for target in targets:
             tx, ty = target.values
             cx, cy = tx * self.cell_size, ty * self.cell_size
             pygame.draw.line(self.screen, TARGET_COLOR,
@@ -241,10 +241,11 @@ class MenuScreen:
             TextInput((200, 60, 100, 25), "Map Width:", "10"),
             TextInput((200, 100, 100, 25), "Map Height:", "10"),
             TextInput((200, 140, 100, 25), "Walls %:", "20"),
-            TextInput((200, 200, 100, 25), "Agents:", "6"),
-            TextInput((200, 240, 100, 25), "Episodes:", "2000")
+            TextInput((200, 180, 100, 25), "Targets:", "2"),
+            TextInput((200, 220, 100, 25), "Agents:", "6"),
+            TextInput((200, 260, 100, 25), "Episodes:", "2000")
         ]
-        self.start_button = Button((175, 300, 150, 50), "Start Simulation", self.start)
+        self.start_button = Button((175, 320, 150, 50), "Start Simulation", self.start)
         self.done = False
         self.settings = None
 
@@ -253,9 +254,10 @@ class MenuScreen:
             width = int(self.inputs[0].text)
             height = int(self.inputs[1].text)
             walls_perc = float(self.inputs[2].text)/100
-            agents = int(self.inputs[3].text)
-            episodes = int(self.inputs[4].text)
-            self.settings = ((width, height), walls_perc, agents, episodes)
+            targets = int(self.inputs[3].text)
+            agents = int(self.inputs[4].text)
+            episodes = int(self.inputs[5].text)
+            self.settings = ((width, height), walls_perc, targets, agents, episodes)
             self.done = True
         except ValueError:
             print("Invalid input")

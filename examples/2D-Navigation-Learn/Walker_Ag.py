@@ -1,13 +1,17 @@
 from maspy import *
 from maspy.learning import *
+from maspy.learning.core import HashableWrapper
 from collections import deque
 from random import choice
+from threading import Lock
 import heapq
 
-def draw_ascii_map(graph, walls=None, target=None):
+def draw_ascii_map(graph, walls=None, targets=None):
     if not graph:
         print("(empty graph)")
         return
+    walls = set(walls or [])
+    targets = set(targets or [])
     ys = [x for x, _ in graph.keys()]
     xs = [y for _, y in graph.keys()]
     min_x, max_x = min(xs), max(xs)
@@ -21,7 +25,7 @@ def draw_ascii_map(graph, walls=None, target=None):
         for x in range(min_y, max_y + 1):
             pos = (x, y)
 
-            if pos == target:
+            if pos in targets:
                 row += "X "
             elif pos in walls:
                 row += "# "
@@ -133,27 +137,95 @@ def astar_direction(ag, position, target):
         direction = "right" if dx > 0 else "left"
     return direction
 
+class EpisodeEnvModel(EnvModel):
+    def progress_bar(self, iterable, prefix="Episode", length=50):
+        yield from super().progress_bar(iterable, "Episode", length)
+
 class Walker(Agent):
+    simulation_walkers = {}
+    simulation_stats_lock = Lock()
+
+    @classmethod
+    def reset_simulation_stats(cls):
+        with cls.simulation_stats_lock:
+            cls.simulation_walkers = {}
+
     def __init__(self, name, map: Environment, episodes: int):
         super().__init__(name, max_intentions=1)
+        self.targets_to_find = map.targets_to_find
+        self.last_reported_target_count = -1
+        self.simulation_steps = 0
+        self.search_completed = False
         self.filter_perceptions(add, focus, self.my_name)
         #self.show_slct = True
         #self.show_cycle = True
-        model = EnvModel(map, self, True)
+        model = EpisodeEnvModel(map, self, True)
         self.add_policy(model)
         state = model.env.get(Percept("agt_position", (Any, Any), self.my_name), ck_group=True)
         assert isinstance(state, Percept)
-        model.initial_states = {"position": [state.values]}
+        initial_training_state = HashableWrapper((state.values, frozenset()))
+        model.initial_states = {
+            "position": [state.values],
+            "found_targets": [frozenset()],
+        }
+        model.initial_state_distrib = [initial_training_state]
+        model.curr_state = initial_training_state
         #print(f"Agent {self.my_name} starts at {state.values}")
         model.learn(qlearning, num_episodes=episodes)
         self.reset_knowledge()
+        with self.simulation_stats_lock:
+            self.simulation_walkers[self.my_name] = self
     
     def reset_knowledge(self):
         self.rm(Belief("Path_Graph", Any))
         self.add(Belief("Path_Graph", dict()))
         self.rm(Belief("Wall_Set", Any))
         self.add(Belief("Wall_Set", []))
+        self.add(Belief("use_learn"))
         self.add(Goal("move"))
+
+    def found_target_positions(self):
+        target_pattern = Belief("arrived_target", (Any, Any), "Map")
+        if not self.has(target_pattern):
+            return set()
+
+        found_targets = self.get(target_pattern, all=True)
+        if not isinstance(found_targets, list):
+            return set()
+        return {target.values for target in found_targets}
+
+    def completed_target_search(self):
+        found_count = len(self.found_target_positions())
+        if found_count != self.last_reported_target_count:
+            status = "search complete" if found_count >= self.targets_to_find else "continuing search"
+            self.print(f"Found {found_count}/{self.targets_to_find} targets; {status}")
+            self.last_reported_target_count = found_count
+
+        if found_count < self.targets_to_find:
+            return False
+
+        if not self.search_completed:
+            self.search_completed = True
+            self.print(
+                f"Completed the simulation in {self.simulation_steps} steps"
+            )
+            self.stop_cycle()
+            self.print_simulation_summary_if_complete()
+        return True
+
+    def print_simulation_summary_if_complete(self):
+        with self.simulation_stats_lock:
+            walkers = list(self.simulation_walkers.values())
+            if not walkers or not all(walker.search_completed for walker in walkers):
+                return
+
+            print("\nSimulation step summary:")
+            for walker in sorted(walkers, key=lambda item: item.my_name):
+                print(f"  {walker.my_name}: {walker.simulation_steps} steps")
+
+    def move_and_count(self, direction):
+        self.simulation_steps += 1
+        self.move(direction)
     
     def update_map(self, position, direction):
         map_graph = self.get(Belief("Path_Graph", Any))
@@ -180,40 +252,36 @@ class Walker(Agent):
 
     @pl(gain, Goal("move"), Belief("target", (Any,Any)) & Belief("agt_position", (Any,Any), "Map"))
     def best_move(self, src, target, position):
-        direction = astar_direction(self, position, target) 
+        direction = astar_direction(self, position, target)
         self.print(f'Knowing target {target} and my position {position}  - moving {direction}')
-        if direction != "stay": self.move(direction)
-        
+        if direction != "stay": self.move_and_count(direction)
+
         self.perceive("Map") # Manual Perception of Map
         self.update_map(position, direction) # Update of Map/Wall Beliefs
-        
-        if not self.has(Belief("arrived_target", (Any,Any), "Map")):
+
+        if not self.completed_target_search():
             return False # Retries current event
         else:
-            self.print(f"Driver {self.my_name} arrived at {target}")
-            self.stop_cycle()
-            
+            self.print(f"Driver {self.my_name} arrived at all targets")
+
     @pl(gain, Goal("move"), Belief("agt_position", (Any,Any), "Map"))
     def make_move(self, src, position):
+        found_targets = self.found_target_positions()
         if self.has(Belief("use_learn")):
-            direction, _ = self.get_best_action("Map",(position,))
+            direction, _ = self.get_best_action(
+                "Map", (position, frozenset(found_targets))
+            )
             self.print(f"From {position} Moving on a Learned Direction ({direction})")
         else:
             direction = choice(["up", "down", "left", "right"])
-            self.print(f"From {position} Moving on a Random Direction ({direction})")
-        self.move(direction) # Move Action
+            self.print(f"From {position} Moving Randomly ({direction}) without a learned policy")
+        self.move_and_count(direction) # Move Action
 
         self.perceive("Map") # Manual Perception of Map
         self.update_map(position, direction) # Update of Map/Wall Beliefs
             
-        if not self.has(Belief("arrived_target", (Any,Any), "Map")):
+        if not self.completed_target_search():
             return False # Retries current event 
-        
-        target = self.get(Belief("arrived_target", (Any,Any), "Map"))
-        self.print(f"Driver {self.my_name} arrived at {target} first, sending target")
-        self.send(broadcast, tell, Belief("target", target.values))
-        self.print(f"Driver {self.my_name} finished broadcast")
-        self.stop_cycle()
     
     @pl(gain, Belief("Sent_Graph", Any), plan_type=atomic)
     def update_graph(self, src, sent_graph):
