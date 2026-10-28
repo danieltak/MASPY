@@ -1,179 +1,171 @@
-from maspy import *
-from maspy.learning import *
 from collections import deque
 from random import choice, sample
+from threading import RLock
 import random
 
-def generate_map_with_walls(
-    width: int,
-    height: int,
-    target_list: list[tuple[int, int]],
-    wall_prob: float = 0.1,
-    max_attempts: int = 2000,
-):
-    def neighbors(x, y):
-        for dx, dy in [(-1,0), (1,0), (0,-1), (0,1)]:
-            nx, ny = x+dx, y+dy
-            if 0 <= nx < width and 0 <= ny < height:
-                yield nx, ny
+from maspy import Environment, Percept, Any, action
+from maspy.learning import listed
 
+
+def validate_settings(map_size, walls, targets, agents, episodes):
+    width, height = map_size
+    if not (2 <= width <= 50 and 2 <= height <= 50):
+        raise ValueError("Largura e altura devem ficar entre 2 e 50.")
+    if not 0 <= walls <= 0.6:
+        raise ValueError("Use de 0% a 60% de paredes.")
+    if not 2 <= targets < width * height:
+        raise ValueError("É preciso ter ao menos dois alvos e uma célula livre.")
+    if not 2 <= agents <= 20:
+        raise ValueError("Use pelo menos dois agentes, no máximo 20.")
+    if not 1 <= episodes <= 10000:
+        raise ValueError("Use entre 1 e 10000 episódios.")
+
+
+def generate_map_with_walls(width, height, target_list, wall_prob=0.1, max_attempts=2000):
     target_set = set(target_list)
-
     for _ in range(max_attempts):
-        walls = {(x, y) for x in range(width) for y in range(height)
-                 if random.random() < wall_prob and (x, y) not in target_set}
+        walls = {
+            (x, y) for x in range(width) for y in range(height)
+            if random.random() < wall_prob and (x, y) not in target_set
+        }
+        # A busca sai de um único alvo. Começar pelos dois esconderia ilhas.
+        pending = deque([target_list[0]])
+        reachable = {target_list[0]}
+        while pending:
+            x, y = pending.popleft()
+            for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                neighbor = x + dx, y + dy
+                if not (0 <= neighbor[0] < width and 0 <= neighbor[1] < height):
+                    continue
+                if neighbor not in walls and neighbor not in reachable:
+                    reachable.add(neighbor)
+                    pending.append(neighbor)
+        if len(reachable) == width * height - len(walls) and len(reachable) > len(target_set):
+            return walls, sorted(reachable)
+    raise RuntimeError("Não foi possível gerar um mapa conectado. Reduza a porcentagem de paredes.")
 
-        queue = deque(target_list)
-        reachable = set(target_list)
-        while queue:
-            cx, cy = queue.popleft()
-            for nx, ny in neighbors(cx, cy):
-                if (nx, ny) not in walls and (nx, ny) not in reachable:
-                    reachable.add((nx, ny))
-                    queue.append((nx, ny))
-
-        total_open = width * height - len(walls)
-        if len(reachable) == total_open:
-            available = sorted(reachable)
-            return walls, available
-
-    raise RuntimeError("Failed to generate a valid map.")
 
 class Map(Environment):
-    def __init__(self, map_size=(10, 10), walls_prob=0.1, targets=2):
+    def __init__(self, map_size=(10, 10), walls_prob=0.2, targets=2):
+        width, height = map_size
+        if width < 1 or height < 1 or width * height <= targets:
+            raise ValueError("O mapa precisa comportar os alvos e pelo menos uma posição inicial.")
+        if not 0 <= walls_prob < 1:
+            raise ValueError("A proporção de paredes deve estar entre 0 e 1, sem incluir 1.")
+        if targets < 2:
+            raise ValueError("A simulação precisa de pelo menos dois alvos.")
         super().__init__()
-        minimum_targets = 2
-        self.targets_to_find = targets
-        self.moves = {
-            "up": (0, -1),"down": (0, 1), 
-            "right": (1, 0), "left": (-1, 0),
-        }
         self.map_size = map_size
-
-        map_positions = [
-            (x, y)
-            for x in range(self.map_size[0])
-            for y in range(self.map_size[1])
-        ]
-        if not minimum_targets <= targets <= len(map_positions):
-            raise ValueError(
-                f"targets must be between {minimum_targets} and "
-                f"{len(map_positions)}, got {targets}"
-            )
-
-        targets_list = sample(map_positions, targets)
-        for n, target in enumerate(targets_list):
-            self.print(f"Target{n+1} is at {target}")
-            self.create(Percept("target", target))
-        
-        positions = generate_map_with_walls(map_size[0], map_size[1], targets_list, walls_prob, 2000)
-
-        for wall in positions[0]:
+        self.moves = {"up": (0, -1), "down": (0, 1), "right": (1, 0), "left": (-1, 0)}
+        self.competition_lock = RLock()
+        self.targets_to_find = targets
+        self.claimed_targets = {}
+        self.scores = {}
+        self.steps = {}
+        self.agent_positions = {}
+        self.finished = False
+        positions = [(x, y) for x in range(width) for y in range(height)]
+        target_positions = sample(positions, targets)
+        values = [10] + [30 + 20 * index for index in range(targets - 1)]
+        self.target_values = dict(zip(target_positions, values))
+        self.walls, self.open_positions = generate_map_with_walls(
+            width, height, target_positions, walls_prob
+        )
+        for position in target_positions:
+            self.create(Percept("target", position))
+        for wall in self.walls:
             self.create(Percept("wall", wall))
-        self.create(Percept("position", positions[1], listed))
+        self.create(Percept("position", self.open_positions, listed))
+        self.create(Percept("destination", target_positions, listed))
         self.possible_starts = "off-policy"
 
-    def get_target_positions(self) -> list[tuple[int, int]]:
-        targets = self.get(Percept("target", (Any, Any)), all=True)
-        if not isinstance(targets, list):
-            return []
-        return [target.values for target in targets]
-    
-    def reset_positions(self, og_pos):
-        found_pos = self.get(Percept("arrived_target", (Any, Any)), all=True)
-        assert isinstance(found_pos, list)
-        self.delete(found_pos)
-        new_pos_prcpts = self.get(Percept("agt_position", (Any, Any)), all=True)
-        assert isinstance(new_pos_prcpts, list)
-        for pos_prcpt in new_pos_prcpts:
-            pos_prcpt.change(values=og_pos[pos_prcpt.group])
+    def get_target_positions(self):
+        return list(self.target_values)
 
-    def on_connect(self, agt):
-        target_positions = self.get_target_positions()
-        open_positions = [
-            (x, y)
-            for x in range(self.map_size[0])
-            for y in range(self.map_size[1])
-            if not self.has(Percept("wall", (x, y)))
-            and (x, y) not in target_positions
-        ]
-        if not open_positions:
-            raise RuntimeError("No open position is available for an agent.")
+    def on_connect(self, agent_name):
+        with self.competition_lock:
+            starts = [position for position in self.open_positions if position not in self.target_values]
+            distances = {
+                position: min(abs(position[0] - x) + abs(position[1] - y) for x, y in self.target_values)
+                for position in starts
+            }
+            distant = [position for position in starts if distances[position] > self.map_size[0] / 2]
+            if not distant:
+                farthest = max(distances.values())
+                distant = [position for position in starts if distances[position] == farthest]
+            position = choice(distant)
+            self.agent_positions[agent_name] = position
+            self.scores[agent_name] = 0
+            self.steps[agent_name] = 0
+            self.create(Percept("agt_position", position, agent_name))
+            self.create(Percept("available_targets", {}, agent_name))
+            self.create(Percept("score", 0, agent_name))
+            self.publish_status()
 
-        def distance_to_closest_target(position):
-            return min(
-                abs(position[0] - target[0]) + abs(position[1] - target[1])
-                for target in target_positions
-            )
+    def publish_status(self):
+        available = {position: value for position, value in self.target_values.items()
+                     if position not in self.claimed_targets}
+        for name in self.scores:
+            board = self.get(Percept("available_targets", Any, name), ck_group=True)
+            board.change(values=(available.copy(),))
+            score = self.get(Percept("score", Any, name), ck_group=True)
+            score.change(values=(self.scores[name],))
 
-        distant_positions = [
-            position
-            for position in open_positions
-            if distance_to_closest_target(position) > self.map_size[0] / 2
-        ]
-        if not distant_positions:
-            greatest_distance = max(map(distance_to_closest_target, open_positions))
-            distant_positions = [
-                position
-                for position in open_positions
-                if distance_to_closest_target(position) == greatest_distance
-            ]
+    def _perception(self):
+        with self.competition_lock:
+            return super()._perception()
 
-        start_pos = choice(distant_positions)
-        self.create(Percept("agt_position", start_pos, agt))
-        #print(f"MAP> Agent {agt} starts at {start_pos}")
-    
     def moviment(self, position, direction):
         dx, dy = self.moves[direction]
-        new_x = max(0, min(position[0] + dx, self.map_size[0] - 1))
-        new_y = max(0, min(position[1] + dy, self.map_size[1] - 1)) 
-        return new_x, new_y
-    
-    def move_transition(self, position, found_targets, direction):
-        reward = -1
-        terminated = False
+        x = max(0, min(position[0] + dx, self.map_size[0] - 1))
+        y = max(0, min(position[1] + dy, self.map_size[1] - 1))
+        return x, y
 
-        found_targets = frozenset(found_targets)
-        new_position = self.moviment(position, direction)
-        new_found_targets = found_targets
+    def move_transition(self, position, destination, direction):
+        next_position = self.moviment(position, direction)
+        if self.has(Percept("wall", next_position)) or next_position == position:
+            return position, -10, False
+        if next_position == destination:
+            return next_position, self.target_values[destination], True
+        return next_position, -1, False
 
-        if (
-            new_position in self.get_target_positions()
-            and new_position not in found_targets
-        ):
-            new_found_targets = found_targets | {new_position}
-            reward = 10
-            terminated = len(new_found_targets) == self.targets_to_find
-        elif new_position in found_targets:
-            reward = -5
-        elif self.has(Percept("wall", new_position)) or position == new_position:
-            reward = -10
-        return new_position, new_found_targets, reward, terminated
-    
     @action(listed, ["up", "down", "left", "right"], move_transition)
-    def move(self, agt, direction):
-        position = self.get(Percept("agt_position", (Any, Any), agt), ck_group=True)
-        assert isinstance(position, Percept)
-        
-        wall_flag = False
-        pos = position.values
-        if direction == "stay":
-            new_pos = pos
-        else:
-            new_pos = self.moviment(pos, direction)
-            if self.has(Percept("wall", new_pos)):
-                wall_flag = True
-                new_pos = pos
-            else:
-                position.change(values=new_pos)
-        
-        n_pos = self.get(Percept("agt_position", (Any, Any), agt), ck_group=True).values
-        if n_pos in self.get_target_positions():
-            arrived_target = Percept("arrived_target", n_pos, agt)
-            if not self.has(arrived_target, ck_group=True):
-                self.print(f"{agt} in {pos} moves {direction} and found target {n_pos}")
-                self.create(arrived_target)
-        elif wall_flag:
-            self.print(f"{agt} in {pos} moves {direction} but hits a wall")
-        else:
-            self.print(f"{agt} in {pos} moves {direction} to {n_pos}")
+    def move(self, agent_name, direction):
+        if direction not in self.moves and direction != "stay":
+            raise ValueError(f"Direção inválida: {direction}")
+        # Movimento, pontuação e conquista acontecem juntos, inclusive com threads.
+        with self.competition_lock:
+            if self.finished:
+                return
+            position = self.agent_positions[agent_name]
+            next_position = position if direction == "stay" else self.moviment(position, direction)
+            self.steps[agent_name] += 1
+            if next_position in self.walls:
+                next_position = position
+            self.agent_positions[agent_name] = next_position
+            percept = self.get(Percept("agt_position", (Any, Any), agent_name), ck_group=True)
+            percept.change(values=next_position)
+            if next_position in self.target_values and next_position not in self.claimed_targets:
+                value = self.target_values[next_position]
+                self.claimed_targets[next_position] = agent_name
+                self.scores[agent_name] += value
+                self.create(Percept("arrived_target", next_position, agent_name))
+                self.finished = len(self.claimed_targets) == len(self.target_values)
+                self.publish_status()
+                self.print(f"{agent_name} conquistou {next_position}: +{value} pontos")
+
+    def get_results(self):
+        with self.competition_lock:
+            best_score = max(self.scores.values(), default=0)
+            winners = [name for name, score in self.scores.items() if score == best_score]
+            return {
+                "finished": self.finished,
+                "scores": self.scores.copy(),
+                "steps": self.steps.copy(),
+                "positions": self.agent_positions.copy(),
+                "winners": winners if self.finished else [],
+                "targets": [
+                    {"position": position, "value": value, "owner": self.claimed_targets.get(position)}
+                    for position, value in self.target_values.items()
+                ],
+            }

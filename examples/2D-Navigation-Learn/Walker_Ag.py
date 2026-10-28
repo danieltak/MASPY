@@ -1,303 +1,150 @@
-from maspy import *
-from maspy.learning import *
-from maspy.learning.core import HashableWrapper
-from collections import deque
-from random import choice
-from threading import Lock
+from collections import Counter
 import heapq
 
-def draw_ascii_map(graph, walls=None, targets=None):
-    if not graph:
-        print("(empty graph)")
-        return
-    walls = set(walls or [])
-    targets = set(targets or [])
-    ys = [x for x, _ in graph.keys()]
-    xs = [y for _, y in graph.keys()]
-    min_x, max_x = min(xs), max(xs)
-    min_y, max_y = min(ys), max(ys)
-    print("  ", end="")
-    for x in range(min_y, max_y + 1):
-        print(f"{x} ", end="")
-    print()
-    for y in range(min_x, max_x + 1):
-        row = f"{y} "
-        for x in range(min_y, max_y + 1):
-            pos = (x, y)
+from maspy import Agent, Belief, Goal, Any, add, gain, focus, pl, atomic, broadcast, tell
+from maspy.learning import EnvModel, qlearning
 
-            if pos in targets:
-                row += "X "
-            elif pos in walls:
-                row += "# "
-            elif pos in graph:
-                row += "o "   
-            else:
-                row += ". "      
-        print(row)
 
-def reconstruct_path(came_from, current):
-    path = []
-    while current is not None:
-        path.append(current)
-        current = came_from[current]
-    return path[::-1]
+def choose_target(position, available):
+    if not available:
+        return None
+    # O valor vem primeiro. Distância e coordenadas só desempatarão valores iguais.
+    return min(available, key=lambda target: (
+        -available[target],
+        abs(position[0] - target[0]) + abs(position[1] - target[1]),
+        target,
+    ))
 
-def reconstruct_path_known(start, target, known):
-    q = deque([start])
-    prev = {start: None}
 
-    while q:
-        cur = q.popleft()
-        if cur == target:
-            return reconstruct_path(prev, cur)
-        if cur not in known:
-            continue
-        for nxt in known[cur]:
-            if nxt not in prev:
-                prev[nxt] = cur
-                q.append(nxt)
-    return None
-
-def astar_explore(start, goal, known, walls):
-    walls = set(walls)       
-    start = tuple(start)
-    goal = tuple(goal)
-
-    open_set = []
-    heapq.heappush(open_set, (0, start))
-
-    came_from = {}
-    g = {start: 0}
-
-    def h(p):
-        return abs(goal[0] - p[0]) + abs(goal[1] - p[1])
-
-    def neighbors(node):
-        x, y = node
-        all_nbrs = [
-            (x+1, y),
-            (x-1, y),
-            (x, y+1),
-            (x, y-1),
-        ]
-
-        valid = []
-        for nxt in all_nbrs:
-            if nxt in walls:
-                continue
-            valid.append(nxt)
-        return valid
-
-    while open_set:
-        _, current = heapq.heappop(open_set)
-
+def astar_explore(start, goal, known, walls, map_size):
+    width, height = map_size
+    walls = set(walls)
+    pending = [(0, start)]
+    previous = {start: None}
+    costs = {start: 0}
+    while pending:
+        _, current = heapq.heappop(pending)
         if current == goal:
             path = []
-            while current in came_from:
+            while current is not None:
                 path.append(current)
-                current = came_from[current]
-            path.append(start)
-            path.reverse()
-            return path
+                current = previous[current]
+            return path[::-1]
+        x, y = current
+        for neighbor in [(x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)]:
+            if not (0 <= neighbor[0] < width and 0 <= neighbor[1] < height):
+                continue
+            if neighbor in walls:
+                continue
+            step_cost = 1 if neighbor in known.get(current, set()) else 1.25
+            cost = costs[current] + step_cost
+            if neighbor not in costs or cost < costs[neighbor]:
+                costs[neighbor] = cost
+                previous[neighbor] = current
+                distance = abs(goal[0] - neighbor[0]) + abs(goal[1] - neighbor[1])
+                heapq.heappush(pending, (cost + distance, neighbor))
+    return None
 
-        known_neighbors = known.get(current, set())
-        unknown_neighbors = [n for n in neighbors(current) if n not in known_neighbors]
-        
-        for nxt in known_neighbors:
-            new_cost = g[current] + 1
-            if nxt not in g or new_cost < g[nxt]:
-                g[nxt] = new_cost
-                came_from[nxt] = current
-                heapq.heappush(open_set, (new_cost + h(nxt), nxt))
 
-        for nxt in unknown_neighbors:
-            new_cost = g[current] + 1.25
-            if nxt not in g or new_cost < g[nxt]:
-                g[nxt] = new_cost
-                came_from[nxt] = current
-                heapq.heappush(open_set, (new_cost + h(nxt), nxt))
+def astar_direction(agent, position, target):
+    graph = agent.get(Belief("Path_Graph", Any)).values
+    walls = agent.get(Belief("Wall_Set", Any)).values
+    path = astar_explore(position, target, graph, walls, agent.map_size)
+    if not path or len(path) < 2:
+        return "stay"
+    dx, dy = path[1][0] - position[0], path[1][1] - position[1]
+    return {(1, 0): "right", (-1, 0): "left", (0, 1): "down", (0, -1): "up"}[(dx, dy)]
 
-    return None 
-
-def astar_direction(ag, position, target):
-    map_graph = ag.get(Belief("Path_Graph", Any))
-    wall_set = ag.get(Belief("Wall_Set", Any))
-    path = astar_explore(position, target, map_graph.values, wall_set.values)
-    if path is None:
-        path = []
-    if len(path) > 1:
-        target = path[1]
-        
-    dx, dy = target[0] - position[0], target[1] - position[1]
-    if dx == 0 and dy == 0:
-        direction = "stay"
-    elif abs(dy) >= abs(dx):
-        direction = "down" if dy > 0 else "up"
-    else:
-        direction = "right" if dx > 0 else "left"
-    return direction
-
-class EpisodeEnvModel(EnvModel):
-    def progress_bar(self, iterable, prefix="Episode", length=50):
-        yield from super().progress_bar(iterable, "Episode", length)
 
 class Walker(Agent):
-    simulation_walkers = {}
-    simulation_stats_lock = Lock()
-
-    @classmethod
-    def reset_simulation_stats(cls):
-        with cls.simulation_stats_lock:
-            cls.simulation_walkers = {}
-
-    def __init__(self, name, map: Environment, episodes: int):
+    def __init__(self, name, map, episodes=1000):
+        if episodes < 1:
+            raise ValueError("O treinamento precisa de pelo menos um episódio.")
         super().__init__(name, max_intentions=1)
-        self.targets_to_find = map.targets_to_find
-        self.last_reported_target_count = -1
+        self.map_size = map.map_size
+        self.destination = None
+        self.visits = Counter()
+        self.using_path = False
         self.simulation_steps = 0
         self.search_completed = False
         self.filter_perceptions(add, focus, self.my_name)
-        #self.show_slct = True
-        #self.show_cycle = True
-        model = EpisodeEnvModel(map, self, True)
+        model = EnvModel(map, self)
         self.add_policy(model)
-        state = model.env.get(Percept("agt_position", (Any, Any), self.my_name), ck_group=True)
-        assert isinstance(state, Percept)
-        initial_training_state = HashableWrapper((state.values, frozenset()))
-        model.initial_states = {
-            "position": [state.values],
-            "found_targets": [frozenset()],
-        }
-        model.initial_state_distrib = [initial_training_state]
-        model.curr_state = initial_training_state
-        #print(f"Agent {self.my_name} starts at {state.values}")
-        model.learn(qlearning, num_episodes=episodes)
-        self.reset_knowledge()
-        with self.simulation_stats_lock:
-            self.simulation_walkers[self.my_name] = self
-    
-    def reset_knowledge(self):
-        self.rm(Belief("Path_Graph", Any))
-        self.add(Belief("Path_Graph", dict()))
-        self.rm(Belief("Wall_Set", Any))
+        # Cada episódio aprende a alcançar um destino, sem alterar a competição.
+        model.learn(qlearning, num_episodes=episodes, max_steps=map.map_size[0] * map.map_size[1] * 4)
+        self.add(Belief("Path_Graph", {}))
         self.add(Belief("Wall_Set", []))
-        self.add(Belief("use_learn"))
         self.add(Goal("move"))
 
-    def found_target_positions(self):
-        target_pattern = Belief("arrived_target", (Any, Any), "Map")
-        if not self.has(target_pattern):
-            return set()
-
-        found_targets = self.get(target_pattern, all=True)
-        if not isinstance(found_targets, list):
-            return set()
-        return {target.values for target in found_targets}
-
-    def completed_target_search(self):
-        found_count = len(self.found_target_positions())
-        if found_count != self.last_reported_target_count:
-            status = "search complete" if found_count >= self.targets_to_find else "continuing search"
-            self.print(f"Found {found_count}/{self.targets_to_find} targets; {status}")
-            self.last_reported_target_count = found_count
-
-        if found_count < self.targets_to_find:
-            return False
-
-        if not self.search_completed:
-            self.search_completed = True
-            self.print(
-                f"Completed the simulation in {self.simulation_steps} steps"
-            )
-            self.stop_cycle()
-            self.print_simulation_summary_if_complete()
-        return True
-
-    def print_simulation_summary_if_complete(self):
-        with self.simulation_stats_lock:
-            walkers = list(self.simulation_walkers.values())
-            if not walkers or not all(walker.search_completed for walker in walkers):
-                return
-
-            print("\nSimulation step summary:")
-            for walker in sorted(walkers, key=lambda item: item.my_name):
-                print(f"  {walker.my_name}: {walker.simulation_steps} steps")
-
-    def move_and_count(self, direction):
-        self.simulation_steps += 1
-        self.move(direction)
-    
-    def update_map(self, position, direction):
-        map_graph = self.get(Belief("Path_Graph", Any))
-        wall_list = self.get(Belief("Wall_Set", Any))
-        new_pos = self.get(Belief("agt_position", (Any,Any), "Map"))
-        assert (map_graph and wall_list and new_pos), f"{map_graph} | {wall_list} | {new_pos}"
-        if new_pos.values not in map_graph.values:
-            old_graph = map_graph.values
-            old_graph.setdefault(position, set()).add(new_pos.values)
-            old_graph.setdefault(new_pos.values, set()).add(position)
-            map_graph.change(values=old_graph)
-            self.send(broadcast, tell, Belief("Sent_Graph", old_graph))
-        if new_pos.values == position and direction != "stay":
-            match direction:
-                case "up": wall_pos = (position[0],position[1]-1)
-                case "down": wall_pos = (position[0],position[1]+1)
-                case "left": wall_pos = (position[0]-1,position[1])
-                case "right": wall_pos = (position[0]+1,position[1])
-            walls = wall_list.values
-            if wall_pos not in walls:
-                walls.append(wall_pos)
-                self.print(f"Driver {self.my_name} found a wall at {wall_pos} added to {walls}")
+    def update_map(self, old_position, new_position, direction):
+        graph_belief = self.get(Belief("Path_Graph", Any))
+        walls_belief = self.get(Belief("Wall_Set", Any))
+        graph = graph_belief.values
+        if new_position != old_position:
+            if new_position not in graph.get(old_position, set()):
+                graph.setdefault(old_position, set()).add(new_position)
+                graph.setdefault(new_position, set()).add(old_position)
+                graph_belief.change(values=graph)
+                self.send(broadcast, tell, Belief("Sent_Graph", graph))
+        elif direction != "stay":
+            dx, dy = {"up": (0, -1), "down": (0, 1), "left": (-1, 0), "right": (1, 0)}[direction]
+            wall = old_position[0] + dx, old_position[1] + dy
+            width, height = self.map_size
+            walls = walls_belief.values
+            if 0 <= wall[0] < width and 0 <= wall[1] < height and wall not in walls:
+                walls.append(wall)
+                walls_belief.change(values=walls)
                 self.send(broadcast, tell, Belief("Sent_Walls", walls))
 
-    @pl(gain, Goal("move"), Belief("target", (Any,Any)) & Belief("agt_position", (Any,Any), "Map"))
-    def best_move(self, src, target, position):
-        direction = astar_direction(self, position, target)
-        self.print(f'Knowing target {target} and my position {position}  - moving {direction}')
-        if direction != "stay": self.move_and_count(direction)
-
-        self.perceive("Map") # Manual Perception of Map
-        self.update_map(position, direction) # Update of Map/Wall Beliefs
-
-        if not self.completed_target_search():
-            return False # Retries current event
+    @pl(gain, Goal("move"), Belief("agt_position", (Any, Any), "Map"))
+    def make_move(self, source, position):
+        self.perceive("Map")
+        position = self.get(Belief("agt_position", (Any, Any), "Map")).values
+        available = self.get(Belief("available_targets", Any, "Map")).values
+        target = choose_target(position, available)
+        if target is None:
+            self.search_completed = True
+            self.stop_cycle()
+            return
+        if target != self.destination:
+            self.destination = target
+            self.visits.clear()
+            self.using_path = False
+            self.print(f"Buscando {target}, que vale {available[target]} pontos")
+        self.visits[position] += 1
+        if self.visits[position] >= 3:
+            self.using_path = True
+        if self.using_path:
+            direction = astar_direction(self, position, target)
         else:
-            self.print(f"Driver {self.my_name} arrived at all targets")
+            direction, _ = self.get_best_action("Map", (position, target))
+        old_score = self.get(Belief("score", Any, "Map")).values
+        self.move(direction)
+        self.simulation_steps += 1
+        self.perceive("Map")
+        new_position = self.get(Belief("agt_position", (Any, Any), "Map")).values
+        self.update_map(position, new_position, direction)
+        new_score = self.get(Belief("score", Any, "Map")).values
+        if new_score > old_score:
+            self.send(broadcast, tell, Belief("Target_Claimed", (new_position, self.my_name)))
+        return False
 
-    @pl(gain, Goal("move"), Belief("agt_position", (Any,Any), "Map"))
-    def make_move(self, src, position):
-        found_targets = self.found_target_positions()
-        if self.has(Belief("use_learn")):
-            direction, _ = self.get_best_action(
-                "Map", (position, frozenset(found_targets))
-            )
-            self.print(f"From {position} Moving on a Learned Direction ({direction})")
-        else:
-            direction = choice(["up", "down", "left", "right"])
-            self.print(f"From {position} Moving Randomly ({direction}) without a learned policy")
-        self.move_and_count(direction) # Move Action
-
-        self.perceive("Map") # Manual Perception of Map
-        self.update_map(position, direction) # Update of Map/Wall Beliefs
-            
-        if not self.completed_target_search():
-            return False # Retries current event 
-    
     @pl(gain, Belief("Sent_Graph", Any), plan_type=atomic)
-    def update_graph(self, src, sent_graph):
-        map_graph = self.get(Belief("Path_Graph", Any))
-        old_graph = map_graph.values
-        for node, neighbors in sent_graph.items():
-            if node not in old_graph:
-                old_graph[node] = set(neighbors)
-            else:
-                old_graph[node] |= neighbors
-        map_graph.change(values=old_graph)
-    
+    def update_graph(self, source, received_graph):
+        belief = self.get(Belief("Path_Graph", Any))
+        graph = belief.values
+        for position, neighbors in received_graph.items():
+            graph.setdefault(position, set()).update(neighbors)
+        belief.change(values=graph)
+
     @pl(gain, Belief("Sent_Walls", Any), plan_type=atomic)
-    def update_walls(self, src, sent_graph):
-        wall_set = self.get(Belief("Wall_Set", Any))
-        old_set = wall_set.values
-        if sent_graph[0] not in old_set:
-            old_set.append(sent_graph[0])
-            wall_set.change(values=old_set)
+    def update_walls(self, source, received_walls):
+        belief = self.get(Belief("Wall_Set", Any))
+        walls = sorted(set(belief.values) | set(received_walls))
+        belief.change(values=walls)
+
+    @pl(gain, Belief("Target_Claimed", (Any, Any)), plan_type=atomic)
+    def target_claimed(self, source, claim):
+        position, owner = claim
+        if position == self.destination:
+            self.destination = None

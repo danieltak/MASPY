@@ -1,281 +1,216 @@
-
-from maspy import Admin, Percept, Any
-import pygame 
-import sys 
 import os
+from time import monotonic
 
-os.environ['SDL_VIDEO_CENTERED'] = '1'
+os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
+import pygame
 
-WINDOW_WIDTH = 1000
-WINDOW_HEIGHT = 800
-SIDEBAR_WIDTH = 200
-AGENT_COLOR = (0, 100, 255)
-TARGET_COLOR = (255, 50, 50)
-BG_COLOR = (240, 240, 240)
-GRID_COLOR = (200, 200, 200)
-BUTTON_COLOR = (80, 80, 200)
-BUTTON_HOVER = (100, 100, 250)
-TEXT_COLOR = (255, 255, 255)
-SIDEBAR_WIDTH = 200
+from maspy import Admin
+from Map_Env import validate_settings
 
-pygame.init()
-FONT = pygame.font.SysFont(None, 24)
+WINDOW_WIDTH, WINDOW_HEIGHT = 1200, 800
+SIDEBAR_WIDTH = 330
+BACKGROUND = (241, 243, 246)
+INK = (34, 44, 62)
+AGENT_COLORS = [(42, 103, 180), (139, 68, 173), (0, 134, 112), (205, 80, 67)]
+
+
+def initialize_display(size, title):
+    pygame.display.init()
+    pygame.font.init()
+    pygame.display.set_caption(title)
+    return pygame.display.set_mode(size)
+
+
+def draw_text(screen, text, position, size=19, color=INK):
+    font = pygame.font.SysFont("dejavusans", size)
+    screen.blit(font.render(str(text), True, color), position)
+
 
 class Button:
     def __init__(self, rect, text, callback):
         self.rect = pygame.Rect(rect)
         self.text = text
         self.callback = callback
-        self.hover = False
-
-    def draw(self, screen):
-        color = BUTTON_HOVER if self.hover else BUTTON_COLOR
-        pygame.draw.rect(screen, color, self.rect, border_radius=8)
-        text_surf = FONT.render(self.text, True, TEXT_COLOR)
-        text_rect = text_surf.get_rect(center=self.rect.center)
-        screen.blit(text_surf, text_rect)
 
     def handle_event(self, event):
-        if event.type == pygame.MOUSEMOTION:
-            self.hover = self.rect.collidepoint(event.pos)
-        elif event.type == pygame.MOUSEBUTTONDOWN and self.hover:
+        if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1 and self.rect.collidepoint(event.pos):
             self.callback()
 
+    def draw(self, screen):
+        hovered = self.rect.collidepoint(pygame.mouse.get_pos())
+        pygame.draw.rect(screen, (64, 95, 139) if hovered else (47, 70, 105), self.rect, border_radius=5)
+        draw_text(screen, self.text, (self.rect.x + 12, self.rect.y + 8), 17, (255, 255, 255))
+
+
 class TextInput:
-    def __init__(self, rect, label, default=""):
+    def __init__(self, rect, label, default):
         self.rect = pygame.Rect(rect)
         self.label = label
-        self.placeholder = default
-        self.text = default
+        self.text = str(default)
         self.active = False
-        self.cleared = False   # important
-        self.active = False
-
-    def draw(self, screen):
-        color = (180, 180, 180) if not self.cleared else (255, 255, 255)
-        pygame.draw.rect(screen, (70, 70, 70), self.rect, border_radius=5)
-        if self.active:
-            pygame.draw.rect(screen, (150, 150, 250), self.rect, 2)
-        else:
-            pygame.draw.rect(screen, (120, 120, 120), self.rect, 2)
-        txt_surface = FONT.render(self.text, True, color)
-        #txt_surface = FONT.render(self.text, True, TEXT_COLOR)
-        label_surface = FONT.render(self.label, True, TEXT_COLOR)
-        screen.blit(label_surface, (self.rect.x - 120, self.rect.y + 5))
-        screen.blit(txt_surface, (self.rect.x + 10, self.rect.y + 5))
 
     def handle_event(self, event):
         if event.type == pygame.MOUSEBUTTONDOWN:
-            if self.rect.collidepoint(event.pos):
-                self.active = True
-                if not self.cleared:
-                    self.text = ""
-                    self.cleared = True
-            else:
-                self.active = False
-                if self.text == "":
-                    self.text = self.placeholder
-                    self.cleared = False
+            self.active = self.rect.collidepoint(event.pos)
         if event.type == pygame.KEYDOWN and self.active:
             if event.key == pygame.K_BACKSPACE:
                 self.text = self.text[:-1]
-            elif event.key == pygame.K_RETURN:
-                self.active = False
-            else:
+            elif event.unicode in "0123456789.,":
                 self.text += event.unicode
-        # if event.type == pygame.MOUSEBUTTONDOWN:
-        #     self.active = self.rect.collidepoint(event.pos)
-        # if event.type == pygame.KEYDOWN and self.active:
-        #     if event.key == pygame.K_RETURN:
-        #         self.active = False
-        #     elif event.key == pygame.K_BACKSPACE:
-        #         self.text = self.text[:-1]
-        #     elif event.unicode.isdigit():
-        #         self.text += event.unicode
 
-class MapVisualizer:
-    def __init__(self, env) -> None:
-        pygame.init()
-        self.env = env
-        self.screen = pygame.display.set_mode((WINDOW_WIDTH, WINDOW_HEIGHT))
+    def draw(self, screen):
+        pygame.draw.rect(screen, (255, 255, 255), self.rect, border_radius=4)
+        pygame.draw.rect(screen, (42, 103, 180) if self.active else (168, 177, 191), self.rect, 2, border_radius=4)
+        draw_text(screen, self.label, (self.rect.x - 220, self.rect.y + 8), 18)
+        draw_text(screen, self.text, (self.rect.x + 10, self.rect.y + 8), 18)
 
-        self.map_area_width = WINDOW_WIDTH - SIDEBAR_WIDTH
-        self.map_area_height = WINDOW_HEIGHT
-        self.cell_size = min(
-            self.map_area_width // env.map_size[0],
-            self.map_area_height // env.map_size[1],
-        )
-        pygame.display.set_caption("Map Environment")
-        self.clock = pygame.time.Clock()
-        self.buttons: list[Button] = self._create_buttons()
-    
-    def _create_buttons(self):
-        buttons = []
-        x = self.env.map_size[0]*self.cell_size + 20
-        y = 40
-        spacing = 60
-        actions = [self.action_1, self.action_2, self.action_3]
-        names = ["Pause/Resume", "More Delay", "Less Delay"]
-        for i, func in enumerate(actions):
-            btn = Button(
-                rect=(x, y + i*spacing, SIDEBAR_WIDTH-40, 40),
-                text= names[i],
-                callback=func
-            )
-            buttons.append(btn)
-        return buttons
 
-    def action_1(self): Admin().pause_system()
-    def action_2(self): Admin().slower_cycle()
-    def action_3(self): Admin().faster_cycle()
-    
-    def draw_sidebar(self):
-        sidebar_rect = pygame.Rect(self.env.map_size[0]*self.cell_size, 0, SIDEBAR_WIDTH, self.env.map_size[1]*self.cell_size)
-        pygame.draw.rect(self.screen, (30, 30, 60), sidebar_rect)
-        for btn in self.buttons:
-            btn.draw(self.screen)
-    
-    def draw_map(self):
-        # grid
-        for x in range(0, self.env.map_size[0]*self.cell_size, self.cell_size):
-            pygame.draw.line(self.screen, GRID_COLOR, (x, 0), (x, self.env.map_size[1]*self.cell_size))
-        for y in range(0, self.env.map_size[1]*self.cell_size, self.cell_size):
-            pygame.draw.line(self.screen, GRID_COLOR, (0, y), (self.env.map_size[0]*self.cell_size, y))
-
-        # draw targets
-        targets = self.env.get(Percept("target", (Any, Any)), all=True) or []
-        for target in targets:
-            tx, ty = target.values
-            cx, cy = tx * self.cell_size, ty * self.cell_size
-            pygame.draw.line(self.screen, TARGET_COLOR,
-                            (cx + 4, cy + 4),
-                            (cx + self.cell_size - 4, cy + self.cell_size - 4), 3)
-            pygame.draw.line(self.screen, TARGET_COLOR,
-                            (cx + self.cell_size - 4, cy + 4),
-                            (cx + 4, cy + self.cell_size - 4), 3)
-            
-        # draw walls
-        if self.env.has(Percept("wall", (Any, Any))):
-            walls = self.env.get(Percept("wall", (Any, Any)), all=True)
-            if not walls: walls = []
-            for wall in walls:
-                rect = pygame.Rect(wall.values[0] * self.cell_size, wall.values[1] * self.cell_size, self.cell_size, self.cell_size)
-                pygame.draw.rect(self.screen, (0, 0, 0), rect)
-
-        # draw agents
-        for percept in self.env.get(Percept("agt_position", (Any, Any)), all=True):
-            x, y = percept.values
-            cx = x * self.cell_size + self.cell_size // 2
-            cy = y * self.cell_size + self.cell_size // 2
-            body = self.cell_size // 4
-
-            # body
-            pygame.draw.rect(self.screen, AGENT_COLOR,
-                             (cx - body//2, cy - body//2, body, body))
-            # body id
-            agent_id = percept.group.split("_")[-1]
-            font = pygame.font.SysFont(None, body)
-            text = font.render(agent_id, True, (255, 255, 255))  # black text
-            text_rect = text.get_rect(center=(cx, cy))
-
-            self.screen.blit(text, text_rect)
-
-            # legs
-            leg_len = self.cell_size // 3
-            # body bottom corners/sides
-            bottom_left  = (cx - body//2, cy + body//2)
-            bottom_right = (cx + body//2, cy + body//2)
-
-            # left leg (angled left-down)
-            pygame.draw.line(self.screen, AGENT_COLOR,
-                            bottom_left,
-                            (bottom_left[0] - leg_len//2, bottom_left[1] + leg_len), 2)
-
-            # left-mid leg (straight down)
-            pygame.draw.line(self.screen, AGENT_COLOR,
-                            (cx - body//4, cy + body//2),
-                            (cx - body//4, cy + body//2 + leg_len), 2)
-
-            # right-mid leg (straight down)
-            pygame.draw.line(self.screen, AGENT_COLOR,
-                            (cx + body//4, cy + body//2),
-                            (cx + body//4, cy + body//2 + leg_len), 2)
-
-            # right leg (angled right-down)
-            pygame.draw.line(self.screen, AGENT_COLOR,
-                            bottom_right,
-                            (bottom_right[0] + leg_len//2, bottom_right[1] + leg_len), 2)
-
-    def draw(self):
-        self.screen.fill(BG_COLOR)
-        self.draw_map()
-        self.draw_sidebar()
-        pygame.display.flip()
-        
-    def loop(self):
-        running = True
-        while running:
-            try:
-                for event in pygame.event.get():
-                    if event.type == pygame.QUIT:
-                        running = False
-                    for btn in self.buttons:
-                        btn.handle_event(event)
-            except Exception as e:
-                print(e)
-                sys.exit()
-            
-            self.draw()
-            
-            pygame.time.delay(10)
-            self.clock.tick(30) 
-            
-        pygame.quit()
-        
 class MenuScreen:
-    def __init__(self):
-        self.screen = pygame.display.set_mode((400, 400))
-        pygame.display.set_caption("Simulation Setup")
+    def __init__(self, settings=None):
+        settings = settings or ((10, 10), 0.2, 2, 4, 1000)
+        map_size, walls, _, agents, episodes = settings
+        self.screen = initialize_display((620, 600), "Configurar competição")
         self.clock = pygame.time.Clock()
         self.inputs = [
-            TextInput((200, 60, 100, 25), "Map Width:", "10"),
-            TextInput((200, 100, 100, 25), "Map Height:", "10"),
-            TextInput((200, 140, 100, 25), "Walls %:", "20"),
-            TextInput((200, 180, 100, 25), "Targets:", "2"),
-            TextInput((200, 220, 100, 25), "Agents:", "6"),
-            TextInput((200, 260, 100, 25), "Episodes:", "2000")
+            TextInput((310, 145, 180, 40), "Largura do mapa", map_size[0]),
+            TextInput((310, 200, 180, 40), "Altura do mapa", map_size[1]),
+            TextInput((310, 255, 180, 40), "Paredes (%)", walls * 100),
+            TextInput((310, 310, 180, 40), "Agentes", agents),
+            TextInput((310, 365, 180, 40), "Episódios de treino", episodes),
         ]
-        self.start_button = Button((175, 320, 150, 50), "Start Simulation", self.start)
+        self.start_button = Button((170, 465, 280, 42), "Iniciar competição", self.start)
         self.done = False
         self.settings = None
+        self.error = ""
 
     def start(self):
         try:
-            width = int(self.inputs[0].text)
-            height = int(self.inputs[1].text)
-            walls_perc = float(self.inputs[2].text)/100
-            targets = int(self.inputs[3].text)
-            agents = int(self.inputs[4].text)
-            episodes = int(self.inputs[5].text)
-            self.settings = ((width, height), walls_perc, targets, agents, episodes)
+            width, height = int(self.inputs[0].text), int(self.inputs[1].text)
+            walls = float(self.inputs[2].text.replace(",", ".")) / 100
+            agents, episodes = int(self.inputs[3].text), int(self.inputs[4].text)
+            settings = ((width, height), walls, 2, agents, episodes)
+            validate_settings(*settings)
+            self.settings = settings
             self.done = True
-        except ValueError:
-            print("Invalid input")
+        except ValueError as error:
+            self.error = str(error) if "invalid literal" not in str(error) else "Preencha os campos com números válidos."
+
+    def show_message(self, message):
+        self.screen.fill(BACKGROUND)
+        draw_text(self.screen, message, (45, 250), 20)
+        pygame.display.flip()
+        pygame.event.pump()
+
+    def draw(self):
+        self.screen.fill(BACKGROUND)
+        draw_text(self.screen, "Walker competitivo", (65, 35), 28)
+        draw_text(self.screen, "2 alvos: 10 e 30 pontos. Vence a maior pontuação.", (65, 85), 17)
+        for field in self.inputs:
+            field.draw(self.screen)
+        self.start_button.draw(self.screen)
+        if self.error:
+            # As mensagens cabem em duas linhas, inclusive as do parser numérico.
+            words, line, lines = self.error.split(), "", []
+            for word in words:
+                if len(line + word) > 53:
+                    lines.append(line)
+                    line = ""
+                line += word + " "
+            lines.append(line)
+            for index, text in enumerate(lines[:2]):
+                draw_text(self.screen, text, (35, 535 + index * 23), 16, (175, 40, 40))
+        pygame.display.flip()
 
     def loop(self):
         while not self.done:
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
                     pygame.quit()
-                    sys.exit()
+                    return None
                 self.start_button.handle_event(event)
-                for inp in self.inputs:
-                    inp.handle_event(event)
-
-            self.screen.fill((20, 20, 50))
-            for inp in self.inputs:
-                inp.draw(self.screen)
-            self.start_button.draw(self.screen)
-            pygame.display.flip()
+                for field in self.inputs:
+                    field.handle_event(event)
+            self.draw()
             self.clock.tick(30)
         return self.settings
+
+
+class MapVisualizer:
+    def __init__(self, env):
+        self.env = env
+        self.screen = initialize_display((WINDOW_WIDTH, WINDOW_HEIGHT), "Competição pelos alvos")
+        self.clock = pygame.time.Clock()
+        self.cell_size = min((WINDOW_WIDTH - SIDEBAR_WIDTH - 40) // env.map_size[0],
+                             (WINDOW_HEIGHT - 40) // env.map_size[1])
+        sidebar_x = WINDOW_WIDTH - SIDEBAR_WIDTH + 20
+        self.buttons = [
+            Button((sidebar_x, 70, 285, 40), "Pausar / continuar", Admin().pause_system),
+            Button((sidebar_x, 120, 137, 40), "Mais lento", Admin().slower_cycle),
+            Button((sidebar_x + 147, 120, 138, 40), "Mais rápido", Admin().faster_cycle),
+        ]
+        self.stop_reason = "concluída"
+
+    def draw(self):
+        result = self.env.get_results()
+        self.screen.fill(BACKGROUND)
+        cell = self.cell_size
+        for x in range(self.env.map_size[0]):
+            for y in range(self.env.map_size[1]):
+                rect = pygame.Rect(20 + x * cell, 20 + y * cell, cell, cell)
+                pygame.draw.rect(self.screen, (48, 57, 70) if (x, y) in self.env.walls else (255, 255, 255), rect)
+                pygame.draw.rect(self.screen, (212, 218, 226), rect, 1)
+        for target in result["targets"]:
+            x, y = target["position"]
+            rect = pygame.Rect(23 + x * cell, 23 + y * cell, cell - 6, cell - 6)
+            color = (183, 193, 195) if target["owner"] else (244, 195, 91)
+            pygame.draw.rect(self.screen, color, rect, border_radius=3)
+            draw_text(self.screen, target["value"], (rect.x + 3, rect.y + 1), min(19, max(10, cell // 3)))
+        for index, (name, position) in enumerate(result["positions"].items()):
+            x, y = position
+            center = 20 + x * cell + cell // 2, 20 + y * cell + cell // 2
+            # Pequeno deslocamento mantém agentes na mesma célula distinguíveis.
+            offset = (index % 3 - 1) * max(2, cell // 8)
+            center = center[0] + offset, center[1] + cell // 6
+            pygame.draw.circle(self.screen, AGENT_COLORS[index % len(AGENT_COLORS)], center, max(4, cell // 6))
+            draw_text(self.screen, name.split("_")[-1], (center[0] - 4, center[1] - 8), min(15, max(10, cell // 4)), (255, 255, 255))
+        x = WINDOW_WIDTH - SIDEBAR_WIDTH
+        pygame.draw.rect(self.screen, (227, 232, 239), (x, 0, SIDEBAR_WIDTH, WINDOW_HEIGHT))
+        draw_text(self.screen, "Competição", (x + 20, 22), 25)
+        for button in self.buttons:
+            button.draw(self.screen)
+        draw_text(self.screen, "Alvos", (x + 20, 190), 21)
+        for index, target in enumerate(result["targets"]):
+            y = 225 + index * 45
+            draw_text(self.screen, f"{target['value']} pontos em {target['position']}", (x + 20, y), 17)
+            draw_text(self.screen, target["owner"] or "Disponível", (x + 20, y + 22), 15)
+        draw_text(self.screen, "Placar / movimentos", (x + 20, 335), 20)
+        for index, (name, score) in enumerate(sorted(result["scores"].items(), key=lambda item: -item[1])):
+            draw_text(self.screen, f"{name}: {score} pts / {result['steps'][name]}", (x + 20, 370 + index * 18), 15)
+        if result["finished"]:
+            draw_text(self.screen, "Partida encerrada", (x + 20, 745), 18)
+            draw_text(self.screen, "Vencedor: " + ", ".join(result["winners"]), (x + 20, 771), 16)
+        elif self.stop_reason != "concluída":
+            draw_text(self.screen, self.stop_reason, (x + 20, 745), 17)
+        pygame.display.flip()
+
+    def loop(self, timeout=120, max_moves=10000):
+        started = monotonic()
+        while True:
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    pygame.quit()
+                    return "concluída" if self.env.finished else "janela fechada"
+                for button in self.buttons:
+                    button.handle_event(event)
+            result = self.env.get_results()
+            if not result["finished"] and self.stop_reason == "concluída":
+                if monotonic() - started >= timeout:
+                    self.stop_reason = "Limite de tempo atingido"
+                elif sum(result["steps"].values()) >= max_moves:
+                    self.stop_reason = "Limite de movimentos atingido"
+                if self.stop_reason != "concluída":
+                    Admin().start_event.set()
+                    for agent in self.env._agents.values():
+                        agent.stop_cycle()
+            self.draw()
+            self.clock.tick(30)

@@ -1,54 +1,88 @@
-![MASPY Logo](/docs/imgs/MASPY_LOGO.png)
+# Projeto Inicial - Walker competitivo
 
-*MASPY* is a `Python` Framework which aims to ease the development of a 
-Multi-Agent Systems based on the BDI paradigm. In this paradigm, an agent
-will contain *Beliefs*, its knowledge, *Desire*, its wants, and
-*Intentions*, how it will achieve their wants. 
+Trabalho de Sistemas Multiagentes da UTFPR, de Antonio Galvão Martins Neto e
+Daniel Watanabe. Adaptação do exemplo Navigation on 2D Grid do MASPY.
 
-*MASPY* creates an abstraction layer to model the agents and the environment
-where the agents will act. An agent may contain any number of *Beliefs*, 
-*Objectives*, *Plans*, these to classes model desires and intentions, 
-respectively. The agent can communicate with others agents, by sending
-or requesting any of the previous entitys. This Framework
-uses a Knowledge Query Model Language to model the communication between agents
-using acts of speech, or perfomatives, as a base model, in this way an agent can ask, tell,
-command or teach anything it needs and knows.
+Os agentes disputam dois alvos, de **10 e 30 pontos**. Cada alvo pertence ao
+primeiro agente que chegar. Os Walkers priorizam o maior valor disponível e
+continuam até os dois alvos serem conquistados. Vence a maior pontuação.
 
-For a more in-detph documentation, see our [WIKI](https://github.com/laca-is/MASPY/wiki)
+## Executar
 
-## Install
+Use **Python 3.12 ou 3.13**. O framework MASPY está incluído em `maspy/`;
+não é necessário instalar outra versão do MASPY pelo pip.
 
-To install [MASPY](https://pypi.org/project/maspy-ml/) you can use package-management system `pip`: 
+Na raiz do projeto:
 
-	pip install maspy-ml
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+python examples/2D-Navigation-Learn/Walker_Main.py
+```
 
-To update your already installed version of MASPY to the latest one, you can use:
+No Windows, os dois primeiros comandos são:
 
-	pip install maspy-ml -U
+```bat
+py -3.13 -m venv .venv
+.venv\Scripts\activate
+```
 
-**MASPY needs `Python` 3.12+ to run correctly.**
+A janela permite alterar o mapa, a porcentagem de paredes, os agentes e os
+episódios de treino. O treinamento acontece antes da partida e pode levar alguns
+segundos. Para uma primeira demonstração rápida, use 100 episódios. Depois,
+compare com 1000 episódios. O quadro público informa os alvos; as paredes são
+descobertas na execução ou aprendidas indiretamente no modelo de treinamento.
 
-## Using MASPY
+A tela mostra os valores, os donos dos alvos, o placar, os movimentos e o vencedor.
+As cores dos agentes se repetem a cada quatro; o número identifica cada Walker.
+Agentes podem compartilhar uma célula. Os botões controlam a pausa e a velocidade.
+Feche a janela para terminar o programa após visualizar o resultado.
 
-### Import
+## Executar pelo terminal
 
-To use the Framework you need this simple import  ```from maspy import *``` , nothing more or less.
+```bash
+python examples/2D-Navigation-Learn/Walker_Main.py --headless --quiet --episodes 100 --seed 42 --output resultado.json
+```
 
-Everything for ``MASPY`` to run correctly in imported this way.
+Parâmetros disponíveis em `--help`:
 
-Every internal Function is explained in our [WIKI](https://github.com/laca-is/MASPY/wiki)
+| Parâmetro | Padrão | Descrição |
+| --- | --- | --- |
+| `--width`, `--height` | 10 | Dimensões, entre 2 e 50 |
+| `--walls` | 20 | Porcentagem de paredes, entre 0 e 60 |
+| `--agents` | 4 | Quantidade de agentes, entre 2 e 20 |
+| `--episodes` | 1000 | Episódios de treinamento por agente, de 1 a 10000 |
+| `--seed` | 42 | Semente para o mapa e os sorteios do treinamento |
+| `--delay` | 0.05 | Atraso do ciclo, em segundos |
+| `--timeout` | 120 | Limite da partida após o treino, incluindo pausas |
+| `--max-moves` | 10000 | Limite aproximado de movimentos do conjunto de agentes |
+| `--output` | nenhum | Caminho do resultado JSON |
+| `--headless` | desativado | Executa sem Pygame e sem abrir janela |
+| `--quiet` | desativado | Oculta os logs do MASPY e mostra o resultado final |
 
-## Rough edges
-The project still has some rough edges that should be considered. 
+O contador inclui tentativas bloqueadas por paredes e bordas. Os limites são
+verificados periodicamente e podem ultrapassar alguns movimentos antes da parada.
+Uma partida interrompida não declara vencedor e retorna código 1. Uma partida
+concluída retorna 0; parâmetros inválidos retornam 2.
 
-- The framework API will probably have a decent amount of breaking changes
-in the future.
-- There is no support to run a ``MASPY`` system in a distributed setting.
-- The system performance still unmeasured, altough running a toy system 
-with over thousands of agents was possible.
+A semente não fixa a ordem de execução das threads. O vencedor e a quantidade de
+movimentos podem mudar entre execuções com a mesma configuração.
 
-## Papers published
-- [MASPY: A Python Framework for Developing BDI Agents with Reinforcement Learning, AAMAS, 2026](https://dl.acm.org/doi/10.65109/YIGW5980)
-- [MASPY: A Python-Based Framework for Developing BDI Multi-Agent Systems, PAAMS, 2025](https://link.springer.com/chapter/10.1007/978-3-032-07638-0_18) 
-- [Towards the Integration of Reinforcement Learning into MASPY, WESAAC 2025](https://doi.org/10.5753/wesaac.2025.37544)
-- [MASPY: Towards the Creation of BDI Multi-Agent Systems, WESAAC 2023](https://doi.org/10.5753/wesaac.2023.33440)
+## Código
+
+- `examples/2D-Navigation-Learn/Map_Env.py`: grade, treino, percepções e conquista exclusiva.
+- `examples/2D-Navigation-Learn/Walker_Ag.py`: agente BDI, prioridade por valor, Q-learning, A* e mensagens.
+- `examples/2D-Navigation-Learn/Pygame_Screens.py`: configuração e visualização.
+- `examples/2D-Navigation-Learn/Walker_Main.py`: entrada do programa e limites da execução.
+
+O estado do treino é `(posição, destino)`. Chegar ao destino dá a recompensa do
+alvo; colisões dão -10 e outros passos dão -1. O treino é individual e não disputa
+pontos reais. Ao repetir uma posição três vezes na partida, o agente usa A* com as
+paredes conhecidas até escolher outro destino. As mensagens compartilham caminhos,
+paredes e conquistas; o ambiente decide a propriedade do alvo usando um lock.
+
+## Créditos
+
+Base: MASPY, de LaCA/UTFPR, e implementação inicial de Daniel na branch
+`feature/projeto_inicial`. O framework mantém sua licença MIT em `LICENSE`.
