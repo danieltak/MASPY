@@ -67,8 +67,10 @@ class Map(Environment):
             )
 
         targets_list = sample(map_positions, targets)
+
+        self.target_values[targets_list[0]] = 10
+        self.target_values[targets_list[1]] = 30
         for n, target in enumerate(targets_list):
-            self.target_values[target] = 10 + 20 * n
             self.print(f"Target{n+1} is at {target}: {self.target_values[target]} points")
             self.create(Percept("target", target))
         
