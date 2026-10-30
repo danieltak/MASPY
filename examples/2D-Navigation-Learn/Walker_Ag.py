@@ -27,8 +27,6 @@ class Walker(Agent):
         self.simulation_steps = 0
         self.search_completed = False
         self.filter_perceptions(add, focus, self.my_name)
-        #self.show_slct = True
-        #self.show_cycle = True
         model = EpisodeEnvModel(map, self, True)
         self.add_policy(model)
         state = model.env.get(Percept("agt_position", (Any, Any), self.my_name), ck_group=True)
@@ -40,7 +38,6 @@ class Walker(Agent):
         }
         model.initial_state_distrib = [initial_training_state]
         model.curr_state = initial_training_state
-        #print(f"Agent {self.my_name} starts at {state.values}")
         model.learn(qlearning, num_episodes=episodes)
         self.reset_knowledge()
         with self.simulation_stats_lock:
@@ -86,8 +83,11 @@ class Walker(Agent):
             print("\nSimulation step summary:")
             for walker in sorted(walkers, key=lambda item: item.my_name):
                 print(f"  {walker.my_name}: {self.map.scores[walker.my_name]} points, {walker.simulation_steps} steps")
+            
+            # campeoes
             for target, owner in self.map.claimed_targets.items():
                 print(f"  Target {target} ({self.map.target_values[target]} points): {owner}")
+            
             best_score = max(self.map.scores.values())
             winners = [name for name, score in self.map.scores.items() if score == best_score]
             print(f"Winner: {', '.join(winners)}")

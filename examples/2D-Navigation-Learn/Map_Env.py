@@ -131,7 +131,6 @@ class Map(Environment):
         self.create(Percept("agt_position", start_pos, agt))
         self.scores[agt] = 0
         self.create(Percept("claimed_targets", [], agt))
-        #print(f"MAP> Agent {agt} starts at {start_pos}")
     
     def moviment(self, position, direction):
         dx, dy = self.moves[direction]
@@ -140,6 +139,7 @@ class Map(Environment):
         return new_x, new_y
     
     def move_transition(self, position, found_targets, direction):
+        # recompensa padrao
         reward = -1
         terminated = False
 
@@ -147,15 +147,15 @@ class Map(Environment):
         new_position = self.moviment(position, direction)
         new_found_targets = found_targets
 
-        if (
-            new_position in self.get_target_positions()
-            and self.target_values[new_position] not in found_targets
-        ):
+        if new_position in self.get_target_positions() and self.target_values[new_position] not in found_targets:
             new_found_targets = found_targets | {self.target_values[new_position]}
             reward = self.target_values[new_position]
             terminated = len(new_found_targets) == self.targets_to_find
+            
+        # alvo ja reivindicado
         elif self.target_values.get(new_position) in found_targets:
             reward = -5
+        # parede
         elif self.has(Percept("wall", new_position)) or position == new_position:
             reward = -10
         return new_position, new_found_targets, reward, terminated
