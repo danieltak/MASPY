@@ -18,7 +18,7 @@ if __name__ == '__main__':
     settings = menu.loop()
     if settings:
         map_size, walls_perc, num_targets, num_walkers, episodes = settings
-        map = Map(map_size, walls_perc, num_targets)
+        map = Map(map_size, walls_perc, num_targets) #env
         walkers = []
         Walker.reset_simulation_stats()
         for _ in range(num_walkers):
@@ -26,6 +26,5 @@ if __name__ == '__main__':
             walkers.append(wlk)
         Admin().slow_cycle_by(0.2)
         Thread(target=Admin().start_system, daemon=True).start()
-        #Thread(target=start_interface, daemon=True).start()
         vis = MapVisualizer(map)
         vis.loop()

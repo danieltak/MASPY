@@ -147,12 +147,12 @@ class Map(Environment):
 
         if (
             new_position in self.get_target_positions()
-            and new_position not in found_targets
+            and self.target_values[new_position] not in found_targets
         ):
-            new_found_targets = found_targets | {new_position}
+            new_found_targets = found_targets | {self.target_values[new_position]}
             reward = self.target_values[new_position]
             terminated = len(new_found_targets) == self.targets_to_find
-        elif new_position in found_targets:
+        elif self.target_values.get(new_position) in found_targets:
             reward = -5
         elif self.has(Percept("wall", new_position)) or position == new_position:
             reward = -10
@@ -182,10 +182,11 @@ class Map(Environment):
                     self.claimed_targets[n_pos] = agt
                     self.scores[agt] += self.target_values[n_pos]
                     self.create(Percept("arrived_target", n_pos, agt))
+                    claimed_values = [self.target_values[target] for target in self.claimed_targets]
                     for agent_name in self.scores:
                         claimed = self.get(Percept("claimed_targets", Any, agent_name), ck_group=True)
-                        claimed.change(values=(list(self.claimed_targets),))
-                    self.print(f"{agt} claimed target {n_pos}: +{self.target_values[n_pos]} points")
+                        claimed.change(values=(claimed_values,))
+                    self.print(f"{agt} claimed target worth {self.target_values[n_pos]} points")
         elif wall_flag:
             self.print(f"{agt} in {pos} moves {direction} but hits a wall")
         else:
