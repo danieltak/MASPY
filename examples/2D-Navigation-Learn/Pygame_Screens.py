@@ -1,5 +1,6 @@
 
 from maspy import Admin, Percept, Any
+from math import ceil, sqrt
 import pygame 
 import sys 
 import os
@@ -181,17 +182,36 @@ class MapVisualizer:
                 pygame.draw.rect(self.screen, (0, 0, 0), rect)
 
         # draw agents
-        for percept in self.env.get(Percept("agt_position", (Any, Any)), all=True):
-            x, y = percept.values
-            cx = x * self.cell_size + self.cell_size // 2
-            cy = y * self.cell_size + self.cell_size // 2
+        # Guarda as posicoes do quadro, pois os agentes se movem em outra thread.
+        agents = [
+            (percept.group, percept.values)
+            for percept in self.env.get(Percept("agt_position", (Any, Any)), all=True) or []
+        ]
+        agents_by_position = {}
+        for name, position in agents:
+            agents_by_position.setdefault(position, []).append(name)
+
+        for name, (x, y) in agents:
+            cell_agents = agents_by_position[(x, y)]
+            columns = ceil(sqrt(len(cell_agents)))
+            rows = ceil(len(cell_agents) / columns)
+            index = cell_agents.index(name)
+            slot_width = self.cell_size / columns
+            slot_height = self.cell_size / rows
+            cx = int(x * self.cell_size + (index % columns + 0.5) * slot_width)
+            cy = int(y * self.cell_size + (index // columns + 0.5) * slot_height)
             body = self.cell_size // 4
+            leg_len = self.cell_size // 3
+            if len(cell_agents) > 1:
+                size = int(min(slot_width, slot_height))
+                body = max(4, size // 3)
+                leg_len = max(1, size // 4)
 
             # body
             pygame.draw.rect(self.screen, AGENT_COLOR,
                              (cx - body//2, cy - body//2, body, body))
             # body id
-            agent_id = percept.group.split("_")[-1]
+            agent_id = name.split("_")[-1]
             font = pygame.font.SysFont(None, body)
             text = font.render(agent_id, True, (255, 255, 255))  # black text
             text_rect = text.get_rect(center=(cx, cy))
@@ -199,7 +219,6 @@ class MapVisualizer:
             self.screen.blit(text, text_rect)
 
             # legs
-            leg_len = self.cell_size // 3
             # body bottom corners/sides
             bottom_left  = (cx - body//2, cy + body//2)
             bottom_right = (cx + body//2, cy + body//2)

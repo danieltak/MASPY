@@ -43,7 +43,7 @@ def generate_map_with_walls(
 class Map(Environment):
     def __init__(self, map_size=(10, 10), walls_prob=0.1, targets=2):
         super().__init__()
-        minimum_targets = 2
+
         self.targets_to_find = targets
         self.target_values = {}
         self.claimed_targets = {}
@@ -60,16 +60,13 @@ class Map(Environment):
             for x in range(self.map_size[0])
             for y in range(self.map_size[1])
         ]
-        if not minimum_targets <= targets <= len(map_positions):
-            raise ValueError(
-                f"targets must be between {minimum_targets} and "
-                f"{len(map_positions)}, got {targets}"
-            )
 
         targets_list = sample(map_positions, targets)
 
+        # seta os targets
         self.target_values[targets_list[0]] = 10
         self.target_values[targets_list[1]] = 30
+        
         for n, target in enumerate(targets_list):
             self.print(f"Target{n+1} is at {target}: {self.target_values[target]} points")
             self.create(Percept("target", target))
@@ -86,15 +83,6 @@ class Map(Environment):
         if not isinstance(targets, list):
             return []
         return [target.values for target in targets]
-    
-    def reset_positions(self, og_pos):
-        found_pos = self.get(Percept("arrived_target", (Any, Any)), all=True)
-        assert isinstance(found_pos, list)
-        self.delete(found_pos)
-        new_pos_prcpts = self.get(Percept("agt_position", (Any, Any)), all=True)
-        assert isinstance(new_pos_prcpts, list)
-        for pos_prcpt in new_pos_prcpts:
-            pos_prcpt.change(values=og_pos[pos_prcpt.group])
 
     def on_connect(self, agt):
         target_positions = self.get_target_positions()
@@ -167,15 +155,13 @@ class Map(Environment):
         
         wall_flag = False
         pos = position.values
-        if direction == "stay":
+        
+        new_pos = self.moviment(pos, direction)
+        if self.has(Percept("wall", new_pos)):
+            wall_flag = True
             new_pos = pos
         else:
-            new_pos = self.moviment(pos, direction)
-            if self.has(Percept("wall", new_pos)):
-                wall_flag = True
-                new_pos = pos
-            else:
-                position.change(values=new_pos)
+            position.change(values=new_pos)
         
         n_pos = self.get(Percept("agt_position", (Any, Any), agt), ck_group=True).values
         if n_pos in self.get_target_positions():
