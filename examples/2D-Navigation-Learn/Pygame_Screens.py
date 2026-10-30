@@ -1,5 +1,6 @@
 
 from maspy import Admin, Percept, Any
+from math import ceil, sqrt
 import pygame 
 import sys 
 import os
@@ -134,6 +135,22 @@ class MapVisualizer:
         pygame.draw.rect(self.screen, (30, 30, 60), sidebar_rect)
         for btn in self.buttons:
             btn.draw(self.screen)
+        x = sidebar_rect.x + 20
+        y = 250
+        self.screen.blit(FONT.render("Scores", True, TEXT_COLOR), (x, y))
+        for name, score in self.env.scores.items():
+            y += 25
+            self.screen.blit(FONT.render(f"{name}: {score} pts", True, TEXT_COLOR), (x, y))
+        y += 35
+        for target, value in self.env.target_values.items():
+            owner = self.env.claimed_targets.get(target, "available")
+            self.screen.blit(FONT.render(f"{value} pts: {owner}", True, TEXT_COLOR), (x, y))
+            y += 25
+        if len(self.env.claimed_targets) == self.env.targets_to_find:
+            best_score = max(self.env.scores.values())
+            winners = [name for name, score in self.env.scores.items() if score == best_score]
+            self.screen.blit(FONT.render("Winner:", True, TEXT_COLOR), (x, y + 10))
+            self.screen.blit(FONT.render(", ".join(winners), True, TEXT_COLOR), (x, y + 35))
     
     def draw_map(self):
         # grid
@@ -142,9 +159,9 @@ class MapVisualizer:
         for y in range(0, self.env.map_size[1]*self.cell_size, self.cell_size):
             pygame.draw.line(self.screen, GRID_COLOR, (0, y), (self.env.map_size[0]*self.cell_size, y))
 
-        # draw target
-        target = self.env.get(Percept("target", (Any, Any)))
-        if target:
+        # draw targets
+        targets = self.env.get(Percept("target", (Any, Any)), all=True) or []
+        for target in targets:
             tx, ty = target.values
             cx, cy = tx * self.cell_size, ty * self.cell_size
             pygame.draw.line(self.screen, TARGET_COLOR,
@@ -153,6 +170,8 @@ class MapVisualizer:
             pygame.draw.line(self.screen, TARGET_COLOR,
                             (cx + self.cell_size - 4, cy + 4),
                             (cx + 4, cy + self.cell_size - 4), 3)
+            value = FONT.render(str(self.env.target_values[target.values]), True, (0, 0, 0), BG_COLOR)
+            self.screen.blit(value, (cx + 4, cy + 4))
             
         # draw walls
         if self.env.has(Percept("wall", (Any, Any))):
@@ -163,17 +182,36 @@ class MapVisualizer:
                 pygame.draw.rect(self.screen, (0, 0, 0), rect)
 
         # draw agents
-        for percept in self.env.get(Percept("agt_position", (Any, Any)), all=True):
-            x, y = percept.values
-            cx = x * self.cell_size + self.cell_size // 2
-            cy = y * self.cell_size + self.cell_size // 2
+        # Guarda as posicoes do quadro, pois os agentes se movem em outra thread.
+        agents = [
+            (percept.group, percept.values)
+            for percept in self.env.get(Percept("agt_position", (Any, Any)), all=True) or []
+        ]
+        agents_by_position = {}
+        for name, position in agents:
+            agents_by_position.setdefault(position, []).append(name)
+
+        for name, (x, y) in agents:
+            cell_agents = agents_by_position[(x, y)]
+            columns = ceil(sqrt(len(cell_agents)))
+            rows = ceil(len(cell_agents) / columns)
+            index = cell_agents.index(name)
+            slot_width = self.cell_size / columns
+            slot_height = self.cell_size / rows
+            cx = int(x * self.cell_size + (index % columns + 0.5) * slot_width)
+            cy = int(y * self.cell_size + (index // columns + 0.5) * slot_height)
             body = self.cell_size // 4
+            leg_len = self.cell_size // 3
+            if len(cell_agents) > 1:
+                size = int(min(slot_width, slot_height))
+                body = max(4, size // 3)
+                leg_len = max(1, size // 4)
 
             # body
             pygame.draw.rect(self.screen, AGENT_COLOR,
                              (cx - body//2, cy - body//2, body, body))
             # body id
-            agent_id = percept.group.split("_")[-1]
+            agent_id = name.split("_")[-1]
             font = pygame.font.SysFont(None, body)
             text = font.render(agent_id, True, (255, 255, 255))  # black text
             text_rect = text.get_rect(center=(cx, cy))
@@ -181,7 +219,6 @@ class MapVisualizer:
             self.screen.blit(text, text_rect)
 
             # legs
-            leg_len = self.cell_size // 3
             # body bottom corners/sides
             bottom_left  = (cx - body//2, cy + body//2)
             bottom_right = (cx + body//2, cy + body//2)
@@ -241,10 +278,11 @@ class MenuScreen:
             TextInput((200, 60, 100, 25), "Map Width:", "10"),
             TextInput((200, 100, 100, 25), "Map Height:", "10"),
             TextInput((200, 140, 100, 25), "Walls %:", "20"),
-            TextInput((200, 200, 100, 25), "Agents:", "6"),
-            TextInput((200, 240, 100, 25), "Episodes:", "2000")
+            TextInput((200, 180, 100, 25), "Targets:", "2"),
+            TextInput((200, 220, 100, 25), "Agents:", "6"),
+            TextInput((200, 260, 100, 25), "Episodes:", "2000")
         ]
-        self.start_button = Button((175, 300, 150, 50), "Start Simulation", self.start)
+        self.start_button = Button((175, 320, 150, 50), "Start Simulation", self.start)
         self.done = False
         self.settings = None
 
@@ -253,9 +291,10 @@ class MenuScreen:
             width = int(self.inputs[0].text)
             height = int(self.inputs[1].text)
             walls_perc = float(self.inputs[2].text)/100
-            agents = int(self.inputs[3].text)
-            episodes = int(self.inputs[4].text)
-            self.settings = ((width, height), walls_perc, agents, episodes)
+            targets = int(self.inputs[3].text)
+            agents = int(self.inputs[4].text)
+            episodes = int(self.inputs[5].text)
+            self.settings = ((width, height), walls_perc, targets, agents, episodes)
             self.done = True
         except ValueError:
             print("Invalid input")

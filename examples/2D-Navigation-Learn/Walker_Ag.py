@@ -1,159 +1,100 @@
 from maspy import *
 from maspy.learning import *
+from maspy.learning.core import HashableWrapper
 from collections import deque
 from random import choice
+from threading import Lock
 import heapq
 
-def draw_ascii_map(graph, walls=None, target=None):
-    if not graph:
-        print("(empty graph)")
-        return
-    ys = [x for x, _ in graph.keys()]
-    xs = [y for _, y in graph.keys()]
-    min_x, max_x = min(xs), max(xs)
-    min_y, max_y = min(ys), max(ys)
-    print("  ", end="")
-    for x in range(min_y, max_y + 1):
-        print(f"{x} ", end="")
-    print()
-    for y in range(min_x, max_x + 1):
-        row = f"{y} "
-        for x in range(min_y, max_y + 1):
-            pos = (x, y)
-
-            if pos == target:
-                row += "X "
-            elif pos in walls:
-                row += "# "
-            elif pos in graph:
-                row += "o "   
-            else:
-                row += ". "      
-        print(row)
-
-def reconstruct_path(came_from, current):
-    path = []
-    while current is not None:
-        path.append(current)
-        current = came_from[current]
-    return path[::-1]
-
-def reconstruct_path_known(start, target, known):
-    q = deque([start])
-    prev = {start: None}
-
-    while q:
-        cur = q.popleft()
-        if cur == target:
-            return reconstruct_path(prev, cur)
-        if cur not in known:
-            continue
-        for nxt in known[cur]:
-            if nxt not in prev:
-                prev[nxt] = cur
-                q.append(nxt)
-    return None
-
-def astar_explore(start, goal, known, walls):
-    walls = set(walls)       
-    start = tuple(start)
-    goal = tuple(goal)
-
-    open_set = []
-    heapq.heappush(open_set, (0, start))
-
-    came_from = {}
-    g = {start: 0}
-
-    def h(p):
-        return abs(goal[0] - p[0]) + abs(goal[1] - p[1])
-
-    def neighbors(node):
-        x, y = node
-        all_nbrs = [
-            (x+1, y),
-            (x-1, y),
-            (x, y+1),
-            (x, y-1),
-        ]
-
-        valid = []
-        for nxt in all_nbrs:
-            if nxt in walls:
-                continue
-            valid.append(nxt)
-        return valid
-
-    while open_set:
-        _, current = heapq.heappop(open_set)
-
-        if current == goal:
-            path = []
-            while current in came_from:
-                path.append(current)
-                current = came_from[current]
-            path.append(start)
-            path.reverse()
-            return path
-
-        known_neighbors = known.get(current, set())
-        unknown_neighbors = [n for n in neighbors(current) if n not in known_neighbors]
-        
-        for nxt in known_neighbors:
-            new_cost = g[current] + 1
-            if nxt not in g or new_cost < g[nxt]:
-                g[nxt] = new_cost
-                came_from[nxt] = current
-                heapq.heappush(open_set, (new_cost + h(nxt), nxt))
-
-        for nxt in unknown_neighbors:
-            new_cost = g[current] + 1.25
-            if nxt not in g or new_cost < g[nxt]:
-                g[nxt] = new_cost
-                came_from[nxt] = current
-                heapq.heappush(open_set, (new_cost + h(nxt), nxt))
-
-    return None 
-
-def astar_direction(ag, position, target):
-    map_graph = ag.get(Belief("Path_Graph", Any))
-    wall_set = ag.get(Belief("Wall_Set", Any))
-    path = astar_explore(position, target, map_graph.values, wall_set.values)
-    if path is None:
-        path = []
-    if len(path) > 1:
-        target = path[1]
-        
-    dx, dy = target[0] - position[0], target[1] - position[1]
-    if dx == 0 and dy == 0:
-        direction = "stay"
-    elif abs(dy) >= abs(dx):
-        direction = "down" if dy > 0 else "up"
-    else:
-        direction = "right" if dx > 0 else "left"
-    return direction
+class EpisodeEnvModel(EnvModel):
+    def progress_bar(self, iterable, prefix="Episode", length=50):
+        yield from super().progress_bar(iterable, "Episode", length)
 
 class Walker(Agent):
+    simulation_walkers = {}
+    simulation_stats_lock = Lock()
+
+    @classmethod
+    def reset_simulation_stats(cls):
+        with cls.simulation_stats_lock:
+            cls.simulation_walkers = {}
+
     def __init__(self, name, map: Environment, episodes: int):
         super().__init__(name, max_intentions=1)
+        self.map = map
+        self.targets_to_find = map.targets_to_find
+        self.last_reported_target_count = -1
+        self.simulation_steps = 0
+        self.search_completed = False
         self.filter_perceptions(add, focus, self.my_name)
-        #self.show_slct = True
-        #self.show_cycle = True
-        model = EnvModel(map, self, True)
+        model = EpisodeEnvModel(map, self, True)
         self.add_policy(model)
         state = model.env.get(Percept("agt_position", (Any, Any), self.my_name), ck_group=True)
         assert isinstance(state, Percept)
-        model.initial_states = {"position": [state.values]}
-        #print(f"Agent {self.my_name} starts at {state.values}")
+        initial_training_state = HashableWrapper((state.values, frozenset()))
+        model.initial_states = {
+            "position": [state.values],
+            "found_targets": [frozenset()],
+        }
+        model.initial_state_distrib = [initial_training_state]
+        model.curr_state = initial_training_state
         model.learn(qlearning, num_episodes=episodes)
         self.reset_knowledge()
+        with self.simulation_stats_lock:
+            self.simulation_walkers[self.my_name] = self
     
     def reset_knowledge(self):
         self.rm(Belief("Path_Graph", Any))
         self.add(Belief("Path_Graph", dict()))
         self.rm(Belief("Wall_Set", Any))
         self.add(Belief("Wall_Set", []))
+        self.add(Belief("use_learn"))
         self.add(Goal("move"))
+
+    def found_target_values(self):
+        claimed = self.get(Belief("claimed_targets", Any, "Map"))
+        return set(claimed.values) if claimed else set()
+
+    def completed_target_search(self):
+        found_count = len(self.found_target_values())
+        if found_count != self.last_reported_target_count:
+            status = "search complete" if found_count >= self.targets_to_find else "continuing search"
+            self.print(f"Claimed {found_count}/{self.targets_to_find} targets; {status}")
+            self.last_reported_target_count = found_count
+
+        if found_count < self.targets_to_find:
+            return False
+
+        if not self.search_completed:
+            self.search_completed = True
+            self.print(
+                f"Completed the simulation in {self.simulation_steps} steps"
+            )
+            self.stop_cycle()
+            self.print_simulation_summary_if_complete()
+        return True
+
+    def print_simulation_summary_if_complete(self):
+        with self.simulation_stats_lock:
+            walkers = list(self.simulation_walkers.values())
+            if not walkers or not all(walker.search_completed for walker in walkers):
+                return
+
+            print("\nSimulation step summary:")
+            for walker in sorted(walkers, key=lambda item: item.my_name):
+                print(f"  {walker.my_name}: {self.map.scores[walker.my_name]} points, {walker.simulation_steps} steps")
+            
+            # campeoes
+            for target, owner in self.map.claimed_targets.items():
+                print(f"  Target {target} ({self.map.target_values[target]} points): {owner}")
+            
+            best_score = max(self.map.scores.values())
+            winners = [name for name, score in self.map.scores.items() if score == best_score]
+            print(f"Winner: {', '.join(winners)}")
+
+    def move_and_count(self, direction):
+        self.simulation_steps += 1
+        self.move(direction)
     
     def update_map(self, position, direction):
         map_graph = self.get(Belief("Path_Graph", Any))
@@ -165,7 +106,6 @@ class Walker(Agent):
             old_graph.setdefault(position, set()).add(new_pos.values)
             old_graph.setdefault(new_pos.values, set()).add(position)
             map_graph.change(values=old_graph)
-            self.send(broadcast, tell, Belief("Sent_Graph", old_graph))
         if new_pos.values == position and direction != "stay":
             match direction:
                 case "up": wall_pos = (position[0],position[1]-1)
@@ -176,60 +116,22 @@ class Walker(Agent):
             if wall_pos not in walls:
                 walls.append(wall_pos)
                 self.print(f"Driver {self.my_name} found a wall at {wall_pos} added to {walls}")
-                self.send(broadcast, tell, Belief("Sent_Walls", walls))
-
-    @pl(gain, Goal("move"), Belief("target", (Any,Any)) & Belief("agt_position", (Any,Any), "Map"))
-    def best_move(self, src, target, position):
-        direction = astar_direction(self, position, target) 
-        self.print(f'Knowing target {target} and my position {position}  - moving {direction}')
-        if direction != "stay": self.move(direction)
-        
-        self.perceive("Map") # Manual Perception of Map
-        self.update_map(position, direction) # Update of Map/Wall Beliefs
-        
-        if not self.has(Belief("arrived_target", (Any,Any), "Map")):
-            return False # Retries current event
-        else:
-            self.print(f"Driver {self.my_name} arrived at {target}")
-            self.stop_cycle()
-            
+    
     @pl(gain, Goal("move"), Belief("agt_position", (Any,Any), "Map"))
     def make_move(self, src, position):
+        found_targets = self.found_target_values()
         if self.has(Belief("use_learn")):
-            direction, _ = self.get_best_action("Map",(position,))
+            direction, _ = self.get_best_action(
+                "Map", (position, frozenset(found_targets))
+            )
             self.print(f"From {position} Moving on a Learned Direction ({direction})")
         else:
             direction = choice(["up", "down", "left", "right"])
-            self.print(f"From {position} Moving on a Random Direction ({direction})")
-        self.move(direction) # Move Action
+            self.print(f"From {position} Moving Randomly ({direction}) without a learned policy")
+        self.move_and_count(direction) # Move Action
 
         self.perceive("Map") # Manual Perception of Map
         self.update_map(position, direction) # Update of Map/Wall Beliefs
             
-        if not self.has(Belief("arrived_target", (Any,Any), "Map")):
+        if not self.completed_target_search():
             return False # Retries current event 
-        
-        target = self.get(Belief("arrived_target", (Any,Any), "Map"))
-        self.print(f"Driver {self.my_name} arrived at {target} first, sending target")
-        self.send(broadcast, tell, Belief("target", target.values))
-        self.print(f"Driver {self.my_name} finished broadcast")
-        self.stop_cycle()
-    
-    @pl(gain, Belief("Sent_Graph", Any), plan_type=atomic)
-    def update_graph(self, src, sent_graph):
-        map_graph = self.get(Belief("Path_Graph", Any))
-        old_graph = map_graph.values
-        for node, neighbors in sent_graph.items():
-            if node not in old_graph:
-                old_graph[node] = set(neighbors)
-            else:
-                old_graph[node] |= neighbors
-        map_graph.change(values=old_graph)
-    
-    @pl(gain, Belief("Sent_Walls", Any), plan_type=atomic)
-    def update_walls(self, src, sent_graph):
-        wall_set = self.get(Belief("Wall_Set", Any))
-        old_set = wall_set.values
-        if sent_graph[0] not in old_set:
-            old_set.append(sent_graph[0])
-            wall_set.change(values=old_set)
